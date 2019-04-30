@@ -7,7 +7,7 @@
 #include <dirent.h>
 #include <elf.h>
 
-#define TAG "TSL" // 这个是自定义的LOG的标识
+#define TAG "antiDebug" // 这个是自定义的LOG的标识
 #define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG,TAG ,__VA_ARGS__) // 定义LOGD类型
 
 
@@ -56,6 +56,7 @@ Java_com_yusakul_androidantidebug_MainActivity_antidebug01( JNIEnv *env, jobject
 {
     ptrace(PTRACE_TRACEME, 0, 0, 0);
     LOGD("%s", "antidebug01 run");
+    LOGD("--------------------------");
 }
 
 //方法二：检测TracerPid的值 如果不为0 说明正在被调试
@@ -84,6 +85,7 @@ Java_com_yusakul_androidantidebug_MainActivity_antidebug02( JNIEnv *env, jobject
             LOGD("%s", "antidebug02 run, not find TracerPid");
         }
     }
+    LOGD("--------------------------");
 }
 
 //方法三：检测常用的端口
@@ -108,6 +110,7 @@ Java_com_yusakul_androidantidebug_MainActivity_antidebug03( JNIEnv *env, jobject
         }
     }
     fclose(fp);//关闭流
+    LOGD("--------------------------");
 }
 
 
@@ -137,6 +140,7 @@ Java_com_yusakul_androidantidebug_MainActivity_antidebug04( JNIEnv *env, jobject
     } else {
         LOGD("%s", "dir not access");
     }
+    LOGD("--------------------------");
 }
 
 
@@ -166,20 +170,23 @@ Java_com_yusakul_androidantidebug_MainActivity_antidebug05( JNIEnv *env, jobject
     }
     elfhdr = (Elf32_Ehdr *) base;
 
-    phtable = elfhdr->e_phoff + base;
+    phtable = elfhdr->e_phoff + base;   //程序头部表
 
-    for (i = 0; i < elfhdr->e_phnum; i++) {
-
+    for (i = 0; i < elfhdr->e_phnum; i++) {     //程序头部表 表项数量
+        //LOGD("进入程序头表遍历循环");
         pht = (Elf32_Phdr * )(phtable + i * sizeof(Elf32_Phdr));
 
-        if (pht->p_flags & 1) {
+        if (pht->p_flags & PF_X || pht->p_flags & PF_R || pht->p_flags & PF_W) //段标志 可执行 读 写
+        {
+            //LOGD("进入段分析");
             offset =
                     pht->p_vaddr + base + sizeof(Elf32_Ehdr) + sizeof(Elf32_Phdr) * elfhdr->e_phnum;
             LOGD("offset:%X ,len:%X", offset, pht->p_memsz);
 
             p = (char *) offset;
             size = pht->p_memsz;
-
+           //LOGD("拿到段在内存中的长度");
+           // LOGD("随后开始遍历段中是否有断点");
             for (j = 0, n = 0; j < size; ++j, ++p) {
 
                 if (*p == 0x10 && *(p + 1) == 0xde) {
@@ -197,10 +204,15 @@ Java_com_yusakul_androidantidebug_MainActivity_antidebug05( JNIEnv *env, jobject
             LOGD("### find breakpoint num: %d/n", n);
         }
     }
-
+    LOGD("--------------------------");
 }
 
-//方法六：inotify检测
+/**
+ * 方法六：inotify检测
+ * 通过inotify监控/proc/pid文件夹下的关键文件变化（maps的读，mem的读等），
+ * 若想查看某进程的的虚拟地址空间或者想dump内存，则会触发打开或读取的事件，
+ * 只要接收到这些事件，则说明进程正在被调试，直接kill主进程
+ **/
 extern "C" JNIEXPORT void JNICALL
 Java_com_yusakul_androidantidebug_MainActivity_antidebug06( JNIEnv *env, jobject /* this */)
 {
@@ -216,30 +228,43 @@ Java_com_yusakul_androidantidebug_MainActivity_antidebug06( JNIEnv *env, jobject
     ptrace(PTRACE_TRACEME, 0, 0, 0);
     fd = inotify_init();
     sprintf(buf, "/proc/%d/maps", ppid);
+    //LOGD("buf:%s", buf);
 
+    //监控整个目录子树内的事件
     //wd = inotify_add_watch(fd, "/proc/self/mem", IN_ALL_EVENTS);
     wd = inotify_add_watch(fd, buf, IN_ALL_EVENTS);
+
+    /*
+     * 读取/proc/self/maps可以得到当前进程的内存映射关系，通过读该文件的内容可以得到内存代码段基址。
+     * /proc/self/mem是进程的内存内容，通过修改该文件相当于直接修改当前进程的内存。
+     */
+
     if (wd < 0) {
         LOGD("can't watch %s", buf);
         return;
     }
+    //LOGD("开始循环检查");
     while (1) {
         i = 0;
         //注意要对fd_set进行初始化
-        FD_ZERO(&readfds);
-        FD_SET(fd, &readfds);
+        FD_ZERO(&readfds); /*将readfds清零使集合中不含任何fd*/
+        FD_SET(fd, &readfds); /*将fd加入readfds集合*/
+
         //第一个参数固定要+1，第二个参数是读的fdset，第三个是写的fdset，最后一个是等待的时间
         //最后一个为NULL则为阻塞
         //select系统调用是用来让我们的程序监视多个文件句柄的状态变化
+        //LOGD("获取检查结果");
         ret = select(fd + 1, &readfds, 0, 0, 0);
         if (ret == -1)
             break;
+
+        //LOGD("分发检查结果");
         if (ret) {
             len = read(fd, readbuf, MAXLEN);
             while (i < len) {
                 //返回的buf中可能存了多个inotify_event
                 struct inotify_event *event = (struct inotify_event *) &readbuf[i];
-                LOGD("event mask %d\n", (event->mask & IN_ACCESS) || (event->mask & IN_OPEN));
+                LOGD("event mask %d\n", (event->mask & IN_ACCESS) || (event->mask & IN_OPEN)); //文件读取操作 文件被打开
                 //这里监控读和打开事件
                 if ((event->mask & IN_ACCESS) || (event->mask & IN_OPEN)) {
                     LOGD("kill!!!!!\n");
@@ -254,6 +279,7 @@ Java_com_yusakul_androidantidebug_MainActivity_antidebug06( JNIEnv *env, jobject
     }
     inotify_rm_watch(fd, wd);
     close(fd);
+    LOGD("--------------------------");
 }
 
 //方法七：检测代码执行时间差
@@ -276,59 +302,112 @@ Java_com_yusakul_androidantidebug_MainActivity_antidebug07( JNIEnv *env, jobject
         int ret = kill(pid, SIGKILL);
         return;
     }
+    LOGD("--------------------------");
 }
 
+
+//===================================================================================================================
+// 其他：
+
 // 遍历linker.so导出表, 检查rtld_db_dlactivity地址是否为断点 类似于方法5
-extern "C" JNIEXPORT void JNICALL
-Java_com_yusakul_androidantidebug_MainActivity_antidebug08( JNIEnv *env, jobject /* this */)
-{
-    LOGD("%s", "antidebug08 start");
+// 另外，字符串尽可能的做加密处理动态解密获取，否则容易顺藤摸瓜找到反调试点
 
-    Elf32_Ehdr *elfhdr;
-    Elf32_Phdr *pht;
-    unsigned int size, base, offset, phtable;
-    int n, i, j;
-    char *p;
-    //从maps中读取elf文件在内存中的起始地址
-    char name[] = "linker.so";
-    base = GetLibAddr(name);
-    if (base == 0) {
-        LOGD("find base error/n");
-        return;
-    }
-    elfhdr = (Elf32_Ehdr *) base;
+/**
+ * 检测特定函数中是否存在断点指令
+ * @param addr
+ * @param size
+ * @return true 发现断点指令 false 未发现断点指令
+ */
+bool checkBreakPointCMD(unsigned char* addr, unsigned long int size) {
+    int pid = getpid();
 
-    phtable = elfhdr->e_phoff + base;
-
-    for (i = 0; i < elfhdr->e_phnum; i++) {
-
-        pht = (Elf32_Phdr * )(phtable + i * sizeof(Elf32_Phdr));
-
-        if (pht->p_flags & 1) {
-            offset =
-                    pht->p_vaddr + base + sizeof(Elf32_Ehdr) + sizeof(Elf32_Phdr) * elfhdr->e_phnum;
-            LOGD("offset:%X ,len:%X", offset, pht->p_memsz);
-
-            p = (char *) offset;
-            size = pht->p_memsz;
-
-            for (j = 0, n = 0; j < size; ++j, ++p) {
-
-                if (*p == 0x10 && *(p + 1) == 0xde) {
-                    n++;
-                    LOGD("### find thumb bpt %X /n", p);
-
-                } else if (*p == 0xf0 && *(p + 1) == 0xf7 && *(p + 2) == 0x00 && *(p + 3) == 0xa0) {
-                    n++;
-                    LOGD("### find thumb2 bpt %X /n", p);
-                } else if (*p == 0x01 && *(p + 1) == 0x00 && *(p + 2) == 0x9f && *(p + 3) == 0xef) {
-                    n++;
-                    LOGD("### find arm bpt %X /n", p);
-                }
+    // arm架构cpu断点指令
+    unsigned char armBkpt[4] = { 0 };
+    armBkpt[0] = 0xf0;
+    armBkpt[1] = 0x01;
+    armBkpt[2] = 0xf0;
+    armBkpt[3] = 0xe7;
+    //thumb指令集断点指令
+    unsigned char thumbBkpt[2] = { 0 };
+    thumbBkpt[0] = 0x10;
+    thumbBkpt[1] = 0xde;
+    // 判断模式
+    int mode = (unsigned long int) addr % 2;
+    if (1 == mode) {
+        LOGD("checkbkpt:(thumb mode)该地址为thumb模式");
+        unsigned char* start = (unsigned char*) ((unsigned long int) addr - 1);
+        unsigned char* end = (unsigned char*) ((unsigned long int) start + size);
+        // 遍历对比
+        while (1) {
+            if (start >= end) {
+                LOGD("checkbkpt:(no find bkpt)没有发现断点.");
+                break;
             }
-            LOGD("### find breakpoint num: %d/n", n);
+            if (0 == memcmp(start, thumbBkpt, 2)) {
+                LOGD("checkbkpt:(find it)发现断点.");
+                return  kill(pid, SIGKILL);
+            }
+            start = start + 2;
+        }
+    } else {
+        LOGD("checkbkpt:(arm mode)该地址为arm模式");
+        unsigned char* start =  addr;
+        unsigned char* end = (unsigned char*) ((unsigned long int) start + size);
+        // 遍历对比
+        while (1) {
+            if (start >= end) {
+                LOGD("checkbkpt:(no find)没有发现断点.");
+                break;
+            }
+            if (0 == memcmp(start, armBkpt, 4)) {
+                LOGD("checkbkpt:(find it)发现断点.");
+                return  kill(pid, SIGKILL);
+            }
+            start = start + 4;
         }
     }
+    return false;
+}
 
+
+/**
+ * 判断当前是否存在调试进程
+ * @return
+ */
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_yusakul_androidantidebug_MainActivity_FindDebugProcess( JNIEnv *env, jobject /* this */)
+{
+    int pid = getpid();
+
+    FILE* pfile = NULL;
+    char buf[0x1000] = { 0 };
+    pfile = popen("ps", "r");
+    if (NULL == pfile) {
+        LOGD("ps could not find");
+        return ;
+    }
+    while (fgets(buf, sizeof(buf), pfile)) {
+        // 查找子串
+        char* strA = NULL;
+        char* strB = NULL;
+        char* strC = NULL;
+        char* strD = NULL;
+        char* strE = NULL;
+        strA = strstr(buf, "android_server");
+        strB = strstr(buf, "gdbserver");
+        strC = strstr(buf, "gdb");
+        strD = strstr(buf, "fuwu");
+        strE = strstr(buf, "android_ser");
+        if (strA || strB || strC || strD || strE) {
+            pclose(pfile);
+            LOGD("DebugProcess find");
+            kill(pid, SIGKILL);
+            return ;
+        }
+    }
+    pclose(pfile);
+    LOGD("DebugProcess does not find");
+    return ;
 }
 
