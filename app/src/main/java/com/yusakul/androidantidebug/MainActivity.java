@@ -8,6 +8,11 @@ import android.widget.TextView;
 
 import java.util.TimerTask;
 
+
+// 参考链接：
+// https://bbs.pediy.com/thread-223460.htm
+// https://github.com/VigorousLiang/AndroidAntiDebug
+
 public class MainActivity extends AppCompatActivity {
 
     // Used to load the 'native-lib' library on application startup.
@@ -43,6 +48,7 @@ public class MainActivity extends AppCompatActivity {
     public native void antidebug05();
     public native void antidebug06();
     public native void antidebug07();
+    public native void FindDebugProcess();
 
     public void AntiDebug()
     {
@@ -51,6 +57,14 @@ public class MainActivity extends AppCompatActivity {
             @Override
             public void run() {
                 setTimer();
+            }
+        }.start();
+
+        //反调试01
+        new Thread() {
+            @Override
+            public void run() {
+                antidebug06();
             }
         }.start();
 
@@ -79,9 +93,9 @@ public class MainActivity extends AppCompatActivity {
                     antidebug02();
                     antidebug03();
                     antidebug04();
-                   // antidebug05();
-                    //antidebug06();
+                    antidebug05();
                     antidebug07();
+                    FindDebugProcess();
                     break;
                 }
                 default:
